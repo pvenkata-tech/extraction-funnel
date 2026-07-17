@@ -280,3 +280,11 @@ horizontal worker scaling, a real NER-based de-identification model (the demo
 uses regex — swap for AWS Comprehend Medical or an in-house model), or a
 proper schema-registry service (a JSON file stands in for Glue Data Catalog).
 The interfaces are shaped so any of those are a swap-in, not a rewrite.
+
+`scripts/evaluate_extraction.py` is also a hand-rolled harness, not a formal
+LLM evaluation framework — it has no faithfulness/groundedness scoring, no
+LLM-as-judge cross-check, and no run-over-run trend tracking. A production
+version of this would sit on Ragas or TruLens (or LangSmith/Braintrust for the
+tracing side) rather than a custom precision/recall script. The gap is
+deliberate for a portfolio-scope repo, but it's the first thing that should
+change before this extraction logic touched a real cohort.
