@@ -1,8 +1,8 @@
 """
 Orchestrates DIVE 2 end to end: ingest -> OCR -> de-identify -> lexical filter
-(discard 85-95% here, no LLM cost) -> section chunk -> rule-based cancer_dx +
-LLM negation-aware smoking_status -> confidence gate -> HITL or store -> cohort
-query.
+(discard 85-95% here, no LLM cost) -> section chunk -> rule-based
+indemnification_present + LLM negation-aware liability_cap_status -> confidence
+gate -> HITL or store -> risk-review cohort query.
 
 Run: python -m pdf_pipeline.pipeline sample_data/pdf
 Requires ANTHROPIC_API_KEY in .env for the precision layer.
@@ -21,20 +21,20 @@ from pdf_pipeline.extractor import NegationAwareExtractor
 from pdf_pipeline.lexical_filter import ensure_index, index_document, matches_trigger_vocabulary
 from pdf_pipeline.ocr import extract_text
 
-CANCER_TERMS = ["cancer", "carcinoma", "oncology", "neoplasm", "tumor", "malignant", "malignancy"]
-DIAGNOSIS_SECTIONS = {"diagnosis", "assessment", "unstructured"}
-SMOKING_SECTIONS = {"social_history", "history_of_present_illness", "unstructured"}
+INDEMNIFICATION_TERMS = ["indemnify", "indemnification", "hold harmless"]
+INDEMNIFICATION_SECTIONS = {"indemnification", "recitals", "unstructured"}
+LIABILITY_SECTIONS = {"limitation_of_liability", "unstructured"}
 
 
 def _checksum(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _detect_cancer_dx(chunks) -> tuple[str, float]:
-    """Rule-based, no LLM needed: cancer diagnosis has a closed, predictable vocabulary."""
-    for chunk in relevant_chunks(chunks, DIAGNOSIS_SECTIONS):
+def _detect_indemnification(chunks) -> tuple[str, float]:
+    """Rule-based, no LLM needed: indemnification language has a closed, predictable vocabulary."""
+    for chunk in relevant_chunks(chunks, INDEMNIFICATION_SECTIONS):
         lowered = chunk.text.lower()
-        if any(term in lowered for term in CANCER_TERMS):
+        if any(term in lowered for term in INDEMNIFICATION_TERMS):
             return "true", 0.95
     return "false", 0.7  # absence of a keyword is weaker evidence than presence
 
@@ -53,7 +53,7 @@ async def _process_file(path: Path, session, extractor: NegationAwareExtractor):
     )
     session.add(file_row)
     session.flush()
-    print(f"[ingest] {path.name}: {page_count} page(s), OCR confidence {ocr_confidence:.2f}, {redaction_count} PHI field(s) redacted")
+    print(f"[ingest] {path.name}: {page_count} page(s), OCR confidence {ocr_confidence:.2f}, {redaction_count} sensitive field(s) redacted")
 
     index_document(str(file_row.id), scrubbed_text)
     if not matches_trigger_vocabulary(str(file_row.id)):
@@ -69,23 +69,23 @@ async def _process_file(path: Path, session, extractor: NegationAwareExtractor):
             text=chunk.text, full_section_text=chunk.full_section_text,
         ))
 
-    cancer_dx_value, cancer_dx_confidence = _detect_cancer_dx(chunks)
+    indemnification_value, indemnification_confidence = _detect_indemnification(chunks)
     session.add(ExtractedField(
-        file_id=file_row.id, entity_key=path.stem, field_name="cancer_diagnosis",
-        value=cancer_dx_value, confidence=cancer_dx_confidence, extraction_method="rule",
+        file_id=file_row.id, entity_key=path.stem, field_name="indemnification_present",
+        value=indemnification_value, confidence=indemnification_confidence, extraction_method="rule",
     ))
 
-    smoking_chunks = relevant_chunks(chunks, SMOKING_SECTIONS)
-    target_chunk = smoking_chunks[0]
+    liability_chunks = relevant_chunks(chunks, LIABILITY_SECTIONS)
+    target_chunk = liability_chunks[0]
     result = await extractor.extract(target_chunk, session, file_id=file_row.id)
 
     confidence = float(result["confidence"])
-    negation_detected = "non_smoker" in result.get("smoking_status", "") or "denies" in result.get("evidence_span", "").lower()
+    negation_detected = "uncapped" in result.get("liability_cap_status", "") or "not be limited" in result.get("evidence_span", "").lower()
     extraction_pass = result.get("extraction_pass", 1)
 
     field = ExtractedField(
-        file_id=file_row.id, entity_key=path.stem, field_name="smoking_status",
-        value=result["smoking_status"], confidence=confidence,
+        file_id=file_row.id, entity_key=path.stem, field_name="liability_cap_status",
+        value=result["liability_cap_status"], confidence=confidence,
         extraction_method="llm", negation_detected=negation_detected, extraction_pass=extraction_pass,
         source_ref={"evidence_span": result.get("evidence_span")},
     )
@@ -98,9 +98,9 @@ async def _process_file(path: Path, session, extractor: NegationAwareExtractor):
             reason="negation_ambiguous" if negation_detected else "low_confidence",
         ))
         field.extraction_method = "human_review"
-        print(f"[precision] {path.name}: smoking_status='{result['smoking_status']}' confidence={confidence:.2f} -> HITL queue")
+        print(f"[precision] {path.name}: liability_cap_status='{result['liability_cap_status']}' confidence={confidence:.2f} -> HITL queue")
     else:
-        print(f"[precision] {path.name}: smoking_status='{result['smoking_status']}' confidence={confidence:.2f} -> stored")
+        print(f"[precision] {path.name}: liability_cap_status='{result['liability_cap_status']}' confidence={confidence:.2f} -> stored")
 
 
 async def run(data_dir: str):
@@ -125,12 +125,12 @@ async def run(data_dir: str):
             print(f"[error] {path.name}: {exc!r} -- skipped, other files unaffected")
 
     with get_session() as session:
-        print("\n--- Cohort Query: cancer_diagnosis=true AND smoking_status=non_smoker ---")
-        cancer_entities = {
-            f.entity_key for f in session.query(ExtractedField).filter_by(field_name="cancer_diagnosis", value="true")
+        print("\n--- Risk Review Query: indemnification_present=true AND liability_cap_status=uncapped ---")
+        indemnifying_entities = {
+            f.entity_key for f in session.query(ExtractedField).filter_by(field_name="indemnification_present", value="true")
         }
-        for f in session.query(ExtractedField).filter_by(field_name="smoking_status", value="non_smoker"):
-            if f.entity_key in cancer_entities and f.extraction_method != "human_review":
+        for f in session.query(ExtractedField).filter_by(field_name="liability_cap_status", value="uncapped"):
+            if f.entity_key in indemnifying_entities and f.extraction_method != "human_review":
                 print(f"  {f.entity_key}  (confidence={f.confidence})")
 
 

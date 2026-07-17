@@ -1,8 +1,8 @@
 """
 Regression eval for the precision layer: runs the real extractor (a live Claude
 call, not a mock) against a small hand-labeled gold set and reports per-class
-precision/recall/accuracy for smoking_status, plus accuracy for the rule-based
-cancer_diagnosis field.
+precision/recall/accuracy for liability_cap_status, plus accuracy for the
+rule-based indemnification_present field.
 
 This is the answer to "how do you know a prompt change didn't quietly make
 extraction worse": change EXTRACTION_PROMPT or VERIFY_PROMPT in
@@ -25,18 +25,18 @@ from pdf_pipeline.chunker import chunk_by_section, relevant_chunks
 from pdf_pipeline.deid import deidentify
 from pdf_pipeline.extractor import NegationAwareExtractor
 from pdf_pipeline.ocr import extract_text
-from pdf_pipeline.pipeline import SMOKING_SECTIONS, _detect_cancer_dx
+from pdf_pipeline.pipeline import LIABILITY_SECTIONS, _detect_indemnification
 
-ACCURACY_GATE = 0.80  # fail CI if smoking_status accuracy drops below this
+ACCURACY_GATE = 0.80  # fail CI if liability_cap_status accuracy drops below this
 
 # Ground truth for sample_data/pdf/*.pdf, established when the fixtures were
 # authored (scripts/generate_pdf_data.py). Expand this as new fixtures are added.
 GOLD_SET = [
-    {"file": "patient_0001.pdf", "smoking_status": "non_smoker", "cancer_diagnosis": "true"},
-    {"file": "patient_0002.pdf", "smoking_status": "smoker", "cancer_diagnosis": "true"},
-    {"file": "patient_0004.pdf", "smoking_status": "non_smoker", "cancer_diagnosis": "true"},  # family-history trap
-    {"file": "patient_0005.pdf", "smoking_status": "unknown", "cancer_diagnosis": "true"},     # genuinely ambiguous
-    {"file": "patient_0006.pdf", "smoking_status": "non_smoker", "cancer_diagnosis": "true"},  # OCR fallback path
+    {"file": "contract_0001.pdf", "liability_cap_status": "uncapped", "indemnification_present": "true"},
+    {"file": "contract_0002.pdf", "liability_cap_status": "capped", "indemnification_present": "true"},
+    {"file": "contract_0004.pdf", "liability_cap_status": "uncapped", "indemnification_present": "true"},  # subcontractor trap
+    {"file": "contract_0005.pdf", "liability_cap_status": "unknown", "indemnification_present": "true"},   # genuinely ambiguous
+    {"file": "contract_0006.pdf", "liability_cap_status": "uncapped", "indemnification_present": "true"},  # OCR fallback path
 ]
 
 
@@ -57,48 +57,48 @@ async def evaluate(data_dir: str):
         scrubbed, _ = deidentify(text)
         chunks = chunk_by_section(scrubbed)
 
-        cancer_dx_pred, _ = _detect_cancer_dx(chunks)
-        smoking_chunk = relevant_chunks(chunks, SMOKING_SECTIONS)[0]
-        result = await extractor.extract(smoking_chunk, session=FakeSession())
+        indemnification_pred, _ = _detect_indemnification(chunks)
+        liability_chunk = relevant_chunks(chunks, LIABILITY_SECTIONS)[0]
+        result = await extractor.extract(liability_chunk, session=FakeSession())
 
         predictions.append({
             "file": example["file"],
-            "smoking_status_expected": example["smoking_status"],
-            "smoking_status_predicted": result["smoking_status"],
-            "cancer_dx_expected": example["cancer_diagnosis"],
-            "cancer_dx_predicted": cancer_dx_pred,
+            "liability_expected": example["liability_cap_status"],
+            "liability_predicted": result["liability_cap_status"],
+            "indemnification_expected": example["indemnification_present"],
+            "indemnification_predicted": indemnification_pred,
         })
 
     return predictions
 
 
 def _precision_recall(predictions, label: str) -> tuple[float, float]:
-    tp = sum(1 for p in predictions if p["smoking_status_predicted"] == label and p["smoking_status_expected"] == label)
-    fp = sum(1 for p in predictions if p["smoking_status_predicted"] == label and p["smoking_status_expected"] != label)
-    fn = sum(1 for p in predictions if p["smoking_status_predicted"] != label and p["smoking_status_expected"] == label)
+    tp = sum(1 for p in predictions if p["liability_predicted"] == label and p["liability_expected"] == label)
+    fp = sum(1 for p in predictions if p["liability_predicted"] == label and p["liability_expected"] != label)
+    fn = sum(1 for p in predictions if p["liability_predicted"] != label and p["liability_expected"] == label)
     precision = tp / (tp + fp) if (tp + fp) else float("nan")
     recall = tp / (tp + fn) if (tp + fn) else float("nan")
     return precision, recall
 
 
 def report(predictions) -> float:
-    print(f"{'file':<18} {'smoking: expected -> predicted':<38} {'cancer_dx: exp -> pred':<24} match")
+    print(f"{'file':<20} {'liability: expected -> predicted':<38} {'indemnification: exp -> pred':<30} match")
     correct = 0
     for p in predictions:
-        smoking_match = p["smoking_status_expected"] == p["smoking_status_predicted"]
-        cancer_match = p["cancer_dx_expected"] == p["cancer_dx_predicted"]
-        correct += int(smoking_match)
-        flag = "OK" if smoking_match and cancer_match else "MISMATCH"
+        liability_match = p["liability_expected"] == p["liability_predicted"]
+        indemnification_match = p["indemnification_expected"] == p["indemnification_predicted"]
+        correct += int(liability_match)
+        flag = "OK" if liability_match and indemnification_match else "MISMATCH"
         print(
-            f"{p['file']:<18} "
-            f"{p['smoking_status_expected'] + ' -> ' + p['smoking_status_predicted']:<38} "
-            f"{p['cancer_dx_expected'] + ' -> ' + p['cancer_dx_predicted']:<24} {flag}"
+            f"{p['file']:<20} "
+            f"{p['liability_expected'] + ' -> ' + p['liability_predicted']:<38} "
+            f"{p['indemnification_expected'] + ' -> ' + p['indemnification_predicted']:<30} {flag}"
         )
 
     accuracy = correct / len(predictions)
-    print(f"\nsmoking_status accuracy: {accuracy:.1%} ({correct}/{len(predictions)})")
+    print(f"\nliability_cap_status accuracy: {accuracy:.1%} ({correct}/{len(predictions)})")
 
-    for label in ("smoker", "non_smoker", "unknown"):
+    for label in ("capped", "uncapped", "unknown"):
         precision, recall = _precision_recall(predictions, label)
         print(f"  {label:<12} precision={precision:.2f}  recall={recall:.2f}")
 

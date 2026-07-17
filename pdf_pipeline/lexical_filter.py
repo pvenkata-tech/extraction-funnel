@@ -7,13 +7,15 @@ from opensearchpy import OpenSearch
 
 from common.config import settings
 
-INDEX_NAME = "clinical_notes"
+INDEX_NAME = "vendor_contracts"
 
-# Trigger vocabulary for the cohort question in DIVE 2: "cancer diagnosis" + smoking status.
-# In production this comes from a domain ontology (ICD-10 codes, SNOMED), not a hardcoded list.
+# Trigger vocabulary for the cohort question in DIVE 2: contracts with an
+# indemnification obligation and a liability-cap question. In production this
+# comes from a domain taxonomy (a clause library / contract ontology), not a
+# hardcoded list.
 TRIGGER_TERMS = [
-    "cancer", "carcinoma", "oncology", "neoplasm", "tumor", "malignant", "malignancy",
-    "smoking", "smoker", "tobacco", "non-smoker", "nonsmoker",
+    "indemnify", "indemnification", "hold harmless",
+    "liability", "liable", "limitation of liability", "damages",
 ]
 
 
@@ -34,10 +36,19 @@ def index_document(file_id: str, text: str):
 
 
 def matches_trigger_vocabulary(file_id: str) -> bool:
-    """Returns True if the document contains ANY trigger term — the cheap gate before chunking/LLM."""
+    """Returns True if the document contains ANY trigger term — the cheap gate before chunking/LLM.
+
+    Each term is matched as a phrase, not space-joined into one OR'd query string.
+    An earlier version did the latter, which silently ORs in every individual word
+    of a multi-word term ("limitation of liability" -> also matches on bare "of") --
+    a stopword leak that let an unrelated document (no liability language at all,
+    just the word "of" in an unrelated sentence) pass the cheap filter. Phrase
+    matching requires the words adjacent and in order, which is what "trigger
+    vocabulary" should mean in the first place."""
+    should_clauses = [{"match_phrase": {"text": term}} for term in TRIGGER_TERMS]
     query = {"query": {"bool": {
         "must": [{"term": {"file_id": file_id}}],
-        "filter": [{"match": {"text": {"query": " ".join(TRIGGER_TERMS), "operator": "or"}}}],
+        "filter": [{"bool": {"should": should_clauses, "minimum_should_match": 1}}],
     }}}
     result = _client().search(index=INDEX_NAME, body=query)
     return result["hits"]["total"]["value"] > 0

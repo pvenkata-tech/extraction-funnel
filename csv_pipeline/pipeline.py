@@ -24,7 +24,7 @@ SOURCE_SYSTEM_COLUMN = "source_system"
 
 # Fields known from domain experience to be MNAR-prone even when the stats alone
 # can't distinguish them from MCAR (see MissingnessClassifier docstring).
-DOMAIN_MNAR_PRIORS = {"smoking_status": "MNAR"}
+DOMAIN_MNAR_PRIORS = {"compliance_flag": "MNAR"}
 
 
 def _checksum(path: Path) -> str:

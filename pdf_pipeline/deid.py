@@ -1,16 +1,15 @@
 """
-De-identification node: strips obvious PHI/PII before any text reaches an LLM call
-or the audit log. This is a regex-based demo scrubber — swap for AWS Comprehend
-Medical or an in-house NER model in production; the interface (text in, text out
-plus a redaction count) stays the same.
+De-identification node: strips sensitive identifiers (signer PII, tax IDs) before
+any text reaches an LLM call or the audit log. This is a regex-based demo
+scrubber — swap for AWS Comprehend or an in-house NER/DLP model in production;
+the interface (text in, text out plus a redaction count) stays the same.
 """
 import re
 
 PATTERNS = {
     "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     "PHONE": re.compile(r"\b\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b"),
-    "MRN": re.compile(r"\bMRN[:\s]*\d{6,10}\b", re.IGNORECASE),
-    "DOB": re.compile(r"\b(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/(19|20)\d{2}\b"),
+    "EIN": re.compile(r"\bEIN[:\s]*\d{2}-\d{7}\b", re.IGNORECASE),
     "EMAIL": re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),
 }
 

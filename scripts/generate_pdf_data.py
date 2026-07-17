@@ -1,14 +1,14 @@
 """
-Generates synthetic clinical-note PDFs that exercise every branch of DIVE 2:
+Generates synthetic vendor-contract PDFs that exercise every branch of DIVE 2:
 
-- 0001: cancer diagnosis + explicit patient negation -> IN the cohort
-- 0002: cancer diagnosis + explicit patient smoker -> excluded (wrong status, not missing)
-- 0003: no cancer/smoking vocabulary at all -> discarded by the lexical filter, never reaches an LLM
-- 0004: cancer diagnosis + family-history smoking only, patient's own status stated separately
-        as non-smoker -> tests "distinguish patient from other people"
-- 0005: cancer diagnosis + genuinely hedged/ambiguous smoking history -> triggers the verify
+- 0001: indemnification + explicit "shall not be limited" -> IN the risk-review cohort
+- 0002: indemnification + explicit dollar-figure liability cap -> excluded (capped, not missing)
+- 0003: no liability/indemnification language at all -> discarded by the lexical filter, never reaches an LLM
+- 0004: indemnification + a subcontractor's liability is capped, but the vendor's own liability is
+        stated separately as uncapped -> tests "distinguish the vendor from other parties"
+- 0005: indemnification + genuinely deferred/hedged liability language -> triggers the verify
         pass and still lands in HITL
-- 0006: cancer diagnosis, native text stripped so only a rendered image remains -> exercises
+- 0006: indemnification, native text stripped so only a rendered image remains -> exercises
         the Tesseract OCR fallback path (requires the Docker image; no text layer to cheat with)
 
 Run: python scripts/generate_pdf_data.py
@@ -22,13 +22,13 @@ from PIL import Image, ImageDraw, ImageFont
 OUT_DIR = Path("sample_data/pdf")
 
 
-def _write_text_pdf(path: Path, patient_name: str, mrn: str, sections: dict[str, str]):
+def _write_text_pdf(path: Path, title: str, contract_id: str, sections: dict[str, str]):
     c = canvas.Canvas(str(path), pagesize=LETTER)
     width, height = LETTER
     y = height - 72
 
     c.setFont("Helvetica-Bold", 13)
-    c.drawString(72, y, f"Clinical Note — {patient_name} (MRN: {mrn})")
+    c.drawString(72, y, f"{title} (Contract ID: {contract_id})")
     y -= 28
 
     for heading, body in sections.items():
@@ -58,7 +58,7 @@ def _wrap(text: str, width: int) -> list[str]:
     return lines
 
 
-def _write_image_only_pdf(path: Path, patient_name: str, mrn: str, sections: dict[str, str]):
+def _write_image_only_pdf(path: Path, title: str, contract_id: str, sections: dict[str, str]):
     """No text layer at all -- the page is a single rasterized image, forcing
     the OCR fallback path in pdf_pipeline/ocr.py instead of native text extraction."""
     img = Image.new("RGB", (1700, 2200), "white")
@@ -70,7 +70,7 @@ def _write_image_only_pdf(path: Path, patient_name: str, mrn: str, sections: dic
         font_bold = font = ImageFont.load_default()
 
     y = 80
-    draw.text((80, y), f"Clinical Note - {patient_name} (MRN: {mrn})", font=font_bold, fill="black")
+    draw.text((80, y), f"{title} (Contract ID: {contract_id})", font=font_bold, fill="black")
     y += 70
 
     for heading, body in sections.items():
@@ -93,48 +93,58 @@ def _write_image_only_pdf(path: Path, patient_name: str, mrn: str, sections: dic
 if __name__ == "__main__":
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    _write_text_pdf(OUT_DIR / "patient_0001.pdf", "Jordan Ellis", "MRN10023", {
-        "Chief Complaint": "Follow-up after abnormal mammogram.",
-        "Assessment": "Diagnosis: Stage II invasive ductal carcinoma, left breast. "
-                      "Recommend oncology referral for treatment planning.",
-        "Social History": "Patient denies any history of smoking or tobacco use. "
-                           "Drinks alcohol socially, exercises regularly.",
+    _write_text_pdf(OUT_DIR / "contract_0001.pdf", "Master Services Agreement - TechSupply Corp", "CTR-10023", {
+        "Recitals": "This Master Services Agreement is entered into between Acme Industries ('Client') and "
+                    "TechSupply Corp ('Vendor') for the provision of cloud infrastructure monitoring services.",
+        "Indemnification": "Vendor agrees to indemnify, defend, and hold harmless Client from any third-party "
+                            "claims arising out of Vendor's breach of this Agreement or negligent acts.",
+        "Limitation of Liability": "Vendor's liability under this Agreement shall not be limited, and Vendor "
+                                    "shall be fully liable for all direct and consequential damages arising from "
+                                    "a breach of the Indemnification provisions above.",
     })
 
-    _write_text_pdf(OUT_DIR / "patient_0002.pdf", "Sam Whitfield", "MRN10047", {
-        "Chief Complaint": "Persistent cough and unintentional weight loss.",
-        "Assessment": "Diagnosis: Lung adenocarcinoma, right upper lobe, confirmed on biopsy.",
-        "Social History": "Patient reports current smoking, approximately one pack per day "
-                           "for the past 20 years. Expressed interest in cessation resources.",
+    _write_text_pdf(OUT_DIR / "contract_0002.pdf", "Master Services Agreement - DataFlow Systems", "CTR-10047", {
+        "Recitals": "This Master Services Agreement is entered into between Acme Industries ('Client') and "
+                    "DataFlow Systems ('Vendor') for the provision of data pipeline engineering services.",
+        "Indemnification": "Vendor shall indemnify and hold harmless Client against losses resulting from "
+                            "Vendor's gross negligence or willful misconduct.",
+        "Limitation of Liability": "Except for indemnification obligations, Vendor's total liability under this "
+                                    "Agreement is limited to the fees paid by Client in the twelve (12) months "
+                                    "preceding the claim.",
     })
 
-    _write_text_pdf(OUT_DIR / "patient_0003.pdf", "Priya Nair", "MRN10088", {
-        "Chief Complaint": "Annual physical examination, no acute concerns.",
-        "Assessment": "Routine wellness visit. Cholesterol panel within normal limits. "
-                      "Seasonal allergies noted, continue current antihistamine.",
-        "Plan": "Return in 12 months for annual physical, or sooner if symptoms arise.",
+    _write_text_pdf(OUT_DIR / "contract_0003.pdf", "Equipment Rental Order Form", "ORD-10088", {
+        "Order Details": "Rental of one (1) commercial generator, Model GX-400, for the period June 1 through "
+                          "June 30, 2026. Delivery to 1200 Industrial Pkwy.",
+        "Payment Terms": "Rate: $450 per week. Payment due net 30 from invoice date. No additional terms apply.",
     })
 
-    _write_text_pdf(OUT_DIR / "patient_0004.pdf", "Marcus Boyd", "MRN10112", {
-        "Chief Complaint": "Elevated PSA on routine screening.",
-        "Assessment": "Diagnosis: Prostate cancer, localized, Gleason score 6.",
-        "Family History": "Notable for father's heavy tobacco use for over 30 years and "
-                           "subsequent death from lung cancer at age 68.",
-        "Social History": "Patient himself has never smoked and has no personal tobacco history.",
+    _write_text_pdf(OUT_DIR / "contract_0004.pdf", "Master Services Agreement - BuildRight Construction", "CTR-10112", {
+        "Recitals": "This Master Services Agreement is entered into between Acme Industries ('Client') and "
+                    "BuildRight Construction ('Vendor') for general contracting services on the Northgate site.",
+        "Indemnification": "Vendor shall indemnify Client for claims arising from work performed under this Agreement.",
+        "Affiliates and Subcontractors": "Any subcontractor engaged by Vendor shall carry its own liability "
+                                          "insurance, and such subcontractor's liability to Client shall be "
+                                          "limited to the value of the subcontract.",
+        "Limitation of Liability": "Notwithstanding the subcontractor provisions above, Vendor's own liability "
+                                    "under this Agreement shall not be limited, and Vendor remains fully liable "
+                                    "for all damages arising from its own performance.",
     })
 
-    _write_text_pdf(OUT_DIR / "patient_0005.pdf", "Elena Voss", "MRN10139", {
-        "Chief Complaint": "Blood in stool, referred for colonoscopy follow-up.",
-        "Assessment": "Diagnosis: Colorectal cancer, stage III, post-resection follow-up.",
-        "Social History": "Smoking history unclear from available records; patient may have "
-                           "quit at some point but duration and quantity are not documented "
-                           "in this chart. History includes possibly intermittent use.",
+    _write_text_pdf(OUT_DIR / "contract_0005.pdf", "Master Services Agreement - Meridian Analytics", "CTR-10139", {
+        "Recitals": "This Master Services Agreement is entered into between Acme Industries ('Client') and "
+                    "Meridian Analytics ('Vendor') for business intelligence consulting services.",
+        "Indemnification": "Vendor shall indemnify Client under terms to be finalized in a forthcoming amendment.",
+        "Limitation of Liability": "The parties acknowledge that liability cap provisions are subject to further "
+                                    "negotiation and are not yet finalized as of the Effective Date. A specific "
+                                    "cap amount is to be determined and will be documented in Exhibit B once agreed.",
     })
 
-    _write_image_only_pdf(OUT_DIR / "patient_0006.pdf", "Grace Kim", "MRN10165", {
-        "Chief Complaint": "Referred for suspicious thyroid nodule",
-        "Assessment": "Diagnosis - papillary thyroid carcinoma confirmed on fine needle aspiration",
-        "Social History": "Patient denies ever smoking or using any tobacco products",
+    _write_image_only_pdf(OUT_DIR / "contract_0006.pdf", "Master Services Agreement - Ironclad Logistics", "CTR-10165", {
+        "Recitals": "This Master Services Agreement is entered into between Acme Industries and Ironclad "
+                    "Logistics for third-party warehouse fulfillment services",
+        "Indemnification": "Vendor agrees to indemnify and hold harmless Client for third-party claims",
+        "Limitation of Liability": "Vendor's liability shall not be limited under this Agreement",
     })
 
     print(f"Wrote {len(list(OUT_DIR.glob('*.pdf')))} PDFs to {OUT_DIR}/")

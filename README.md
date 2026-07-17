@@ -21,11 +21,11 @@ INGEST         →   CHEAP FILTER    →    TARGETED FOCUS    →    PRECISION L
 
 | | CSV / structured (`csv_pipeline/`) | PDF / unstructured (`pdf_pipeline/`) |
 |---|---|---|
-| Trigger question | "Millions of CSVs, some rows/columns missing — reconcile them." | "Millions of clinical PDFs — find every cancer patient who's a non-smoker." |
-| Cheap filter | Schema + null-rate validation | OpenSearch keyword gate (cancer/smoking vocabulary) |
-| Targeted focus | Cross-file backfill on entity key | Section chunking (isolate "Social History") |
+| Trigger question | "Millions of vendor CSVs, some rows/columns missing — reconcile them." | "Millions of vendor contracts — find every one with an indemnification clause and no cap on liability." |
+| Cheap filter | Schema + null-rate validation | OpenSearch keyword gate (liability/indemnification vocabulary) |
+| Targeted focus | Cross-file backfill on entity key | Section chunking (isolate "Limitation of Liability") |
 | Precision layer | — (rules resolve almost everything) | Claude, negation-aware, only on the narrowed chunk |
-| Core risk if done naively | Blind imputation silently biases the cohort (MNAR) | Missed negation puts the wrong patient in the cohort |
+| Core risk if done naively | Blind imputation silently biases the vendor risk picture (MNAR) | Missed negation clears a contract that's actually high-risk |
 
 ## 🛠️ Tech Stack
 
@@ -46,7 +46,7 @@ INGEST         →   CHEAP FILTER    →    TARGETED FOCUS    →    PRECISION L
 flowchart TD
     subgraph SOURCE["📥 Raw Sources"]
         CSV[📄 CSV Batches]
-        PDF[📑 PDF Archive]
+        PDF[📑 Contract PDFs]
     end
 
     subgraph INGEST["🚪 Ingest"]
@@ -64,7 +64,7 @@ flowchart TD
     end
 
     subgraph PRECISION["🧠 Precision Layer"]
-        DEID[De-identification]
+        DEID[Sensitive-Field Redaction]
         LLM[Claude Haiku\nnegation-aware extraction]
         VERIFY[Claude Sonnet\nverify pass on low-confidence/hedged]
     end
@@ -103,27 +103,41 @@ flowchart TD
   It also encodes a **domain prior**: MNAR is, by definition, missingness that
   depends on an *unobserved* variable — which means it is statistically
   indistinguishable from MCAR when you only look at the data you have. Fields
-  with a known clinical MNAR pattern (e.g. `smoking_status` blank because a
-  template skips it for non-smokers) are flagged from domain knowledge, because
-  the stats alone can't do it. (`tests/test_missingness_classifier.py` proves both
-  paths, including the case where the naive statistical test gets it wrong.)
+  with a known MNAR pattern (e.g. `compliance_flag` blank because a procurement
+  template only fills it in when there's something to report) are flagged from
+  domain knowledge, because the stats alone can't do it. (`tests/test_missingness_classifier.py`
+  proves both paths, including the case where the naive statistical test gets it wrong.)
+- **A guard against high-cardinality columns faking a MAR signal.** The first
+  real run of this pipeline against the vendor data misclassified `region_code`
+  (genuinely random dropout) as explained by `registration_number` — a
+  near-unique-per-row identifier where every "category" is 1-2 rows, so its
+  null-rate trivially looks like 0% or 100% by chance. Fixed by excluding
+  identifier-like columns (>50% unique values) from the explaining-column search;
+  `tests/test_missingness_classifier.py::test_high_cardinality_identifier_column_does_not_spuriously_explain_missingness`
+  locks this in.
 - **Schema drift detection with fuzzy column matching**, not a silent drop —
-  a renamed column (`diagnosis_code` → `diagnosis_cd`) is caught and merged into
-  a new schema version instead of losing data.
+  a renamed column (`registration_number` → `registration_no`) is caught and
+  merged into a new schema version instead of losing data.
 - **Golden-record dedup with edit-distance fuzzy matching**, tuned to actually
   work on short entity IDs — an early version of this repo used similarity-ratio
-  matching (`difflib`) and it silently collapsed 80 distinct patients into 9,
+  matching (`difflib`) and it silently collapsed 80 distinct vendors into 9,
   because ratio-based matching over short strings with shared prefixes produces
   false positives almost everywhere. Switched to edit distance ≤ 1, which only
   catches genuine single-character typos.
 - **Negation-aware extraction with a real verify pass.** The Claude Haiku prompt
-  in `pdf_pipeline/extractor.py` explicitly handles negation ("denies smoking"),
-  subject attribution ("father smoked" ≠ patient smoked), and current-vs-historical
-  status. Anything low-confidence or hedged gets a second, context-richer pass on
-  Sonnet before it's trusted.
+  in `pdf_pipeline/extractor.py` explicitly handles negation ("liability shall
+  not be limited"), subject attribution (a subcontractor's liability cap ≠ the
+  vendor's own), and deferred/hedged terms ("subject to further negotiation").
+  Anything low-confidence or hedged gets a second, context-richer pass on Sonnet
+  before it's trusted.
 - **A cheap filter that actually discards documents before any LLM call** —
   the OpenSearch keyword gate in `pdf_pipeline/lexical_filter.py` is queried and
-  verified to reject the irrelevant sample document with zero LLM spend.
+  verified to reject an irrelevant sample document (an equipment rental order
+  form with no liability language) with zero LLM spend. An earlier version
+  space-joined multi-word trigger terms into one OR'd query string, which
+  silently leaked common words (e.g. "of" from "limitation of liability") into
+  the match and let the irrelevant document through by accident — fixed by
+  matching each trigger term as an exact phrase.
 - **OCR fallback that's actually exercised** — one sample PDF has no text layer
   at all (rendered from an image), forcing the Tesseract path in `pdf_pipeline/ocr.py`
   instead of the native-text path everything else takes.
@@ -138,44 +152,45 @@ flowchart TD
   captures latency, input/output token counts, and an estimated cost, and
   `common/audit.py` writes them onto the `audit_log` row alongside the prompt and
   response. `scripts/llm_cost_report.py` aggregates that by model — on a real run
-  of the 6 sample PDFs this reports 5 Haiku calls + 1 Sonnet verify pass, ~1.2K
-  input / ~280 output tokens, ~1.6s avg latency, **$0.0047 total cost**. This is
-  the minimum telemetry needed to answer "did the last prompt change get slower
-  or more expensive" without grepping logs.
+  of the 6 sample contracts this reports 5 Haiku calls + 1 Sonnet verify pass,
+  ~1.4K input / ~350 output tokens, **$0.0079 total cost**. This is the minimum
+  telemetry needed to answer "did the last prompt change get slower or more
+  expensive" without grepping logs.
 
 ## 📊 Verified results (real run against this repo's sample data)
 
 CSV pipeline, 3 files / 80 entities / 460 raw field observations:
 ```
-[classify] ehr_export_batch1.csv.smoking_status: MNAR suspected -> flagging 31 rows for HITL, never auto-filled
-[classify] ehr_export_batch1.csv.diagnosis_code: MAR (explained by 'age') -> backfill
-[schema] ehr_export_batch2.csv: fuzzy-matched renamed columns {'diagnosis_cd': 'diagnosis_code'}
+[classify] procurement_export_batch1.csv.compliance_flag: MNAR suspected -> flagging 32 rows for HITL, never auto-filled
+[classify] procurement_export_batch1.csv.registration_number: MAR (explained by 'employee_count') -> backfill
+[schema] procurement_export_batch2.csv: fuzzy-matched renamed columns {'registration_no': 'registration_number'}
 
 [dedup] 460 raw field rows merged into 80 golden entities
 
 --- Data Quality Report ---
-          direct:   409  (88.9%)
-    human_review:    35  (7.6%)
-         imputed:    11  (2.4%)
-      backfilled:     5  (1.1%)
+          direct:   406  (88.3%)
+    human_review:    38  (8.3%)
+         imputed:    13  (2.8%)
+      backfilled:     3  (0.7%)
 ```
 
-PDF pipeline, 6 clinical notes:
+PDF pipeline, 6 vendor contracts:
 ```
-[ingest] patient_0001.pdf: 1 page(s), OCR confidence 1.00, 0 PHI field(s) redacted
-[precision] patient_0001.pdf: smoking_status='non_smoker' confidence=0.99 -> stored
-[filter] patient_0003.pdf: no trigger terms found -> discarded before any LLM call
-[precision] patient_0004.pdf: smoking_status='non_smoker' confidence=1.00 -> stored   # family history correctly excluded
-[precision] patient_0005.pdf: smoking_status='unknown' confidence=1.00 -> stored      # genuinely ambiguous chart, correctly refuses to guess
-[ingest] patient_0006.pdf: 1 page(s), OCR confidence 0.95, 0 PHI field(s) redacted     # image-only PDF, Tesseract fallback path
+[ingest] contract_0001.pdf: 1 page(s), OCR confidence 1.00, 0 sensitive field(s) redacted
+[precision] contract_0001.pdf: liability_cap_status='uncapped' confidence=0.95 -> stored
+[filter] contract_0003.pdf: no trigger terms found -> discarded before any LLM call
+[precision] contract_0004.pdf: liability_cap_status='uncapped' confidence=0.95 -> stored   # subcontractor's cap correctly excluded
+[precision] contract_0005.pdf: liability_cap_status='unknown' confidence=0.95 -> stored    # genuinely deferred terms, correctly refuses to guess
+[ingest] contract_0006.pdf: 1 page(s), OCR confidence 0.95, 0 sensitive field(s) redacted   # image-only PDF, Tesseract fallback path
 
---- Cohort Query: cancer_diagnosis=true AND smoking_status=non_smoker ---
-  patient_0001  (confidence=0.990)
-  patient_0004  (confidence=1.000)
-  patient_0006  (confidence=0.990)
+--- Risk Review Query: indemnification_present=true AND liability_cap_status=uncapped ---
+  contract_0001  (confidence=0.950)
+  contract_0004  (confidence=0.950)
+  contract_0006  (confidence=0.950)
 ```
-1 of 6 documents (`patient_0003`) never reached the LLM at all — the entire point
-of the cheap filter stage.
+1 of 6 documents (`contract_0003`, a plain equipment rental order with no legal
+boilerplate) never reached the LLM at all — the entire point of the cheap
+filter stage.
 
 ## 🎯 Evaluating extraction quality (not just unit tests)
 
@@ -187,16 +202,16 @@ per class, gated at 80% accuracy so it can fail a CI run if a prompt edit regres
 quality.
 
 ```
-file               smoking: expected -> predicted         cancer_dx: exp -> pred   match
-patient_0001.pdf   non_smoker -> non_smoker               true -> true             OK
-patient_0002.pdf   smoker -> smoker                       true -> true             OK
-patient_0004.pdf   non_smoker -> non_smoker               true -> true             OK
-patient_0005.pdf   unknown -> unknown                     true -> true             OK
-patient_0006.pdf   non_smoker -> non_smoker               true -> true             OK
+file                 liability: expected -> predicted       indemnification: exp -> pred   match
+contract_0001.pdf    uncapped -> uncapped                   true -> true                   OK
+contract_0002.pdf    capped -> capped                       true -> true                   OK
+contract_0004.pdf    uncapped -> uncapped                   true -> true                   OK
+contract_0005.pdf    unknown -> unknown                     true -> true                   OK
+contract_0006.pdf    uncapped -> uncapped                   true -> true                   OK
 
-smoking_status accuracy: 100.0% (5/5)
-  smoker       precision=1.00  recall=1.00
-  non_smoker   precision=1.00  recall=1.00
+liability_cap_status accuracy: 100.0% (5/5)
+  capped       precision=1.00  recall=1.00
+  uncapped     precision=1.00  recall=1.00
   unknown      precision=1.00  recall=1.00
 ```
 
@@ -246,7 +261,7 @@ pytest tests/ -v
 ## 💰 Cost model
 
 The cheap filter is the whole cost story. On this sample set, the lexical gate
-discarded 1 of 6 PDFs (~17%) before any LLM call; at real document volumes,
+discarded 1 of 6 contracts (~17%) before any LLM call; at real document volumes,
 keyword/schema filters typically discard 85–95% of files before precision-layer
 cost is incurred at all. Every LLM call in this repo runs against a single
 narrowed chunk (a few hundred tokens), not a raw document — that's the
@@ -261,12 +276,13 @@ common/           SQLAlchemy models (file_registry, extracted_field, hitl_review
                    audit_log), DB session, Anthropic client wrapper
 csv_pipeline/      schema registry, validator, missingness classifier, backfill,
                    dedup, orchestrator
-pdf_pipeline/      OCR (native + Tesseract fallback), de-identification, lexical
-                   filter, section chunker, negation-aware extractor, orchestrator
+pdf_pipeline/      OCR (native + Tesseract fallback), sensitive-field redaction,
+                   lexical filter, section chunker, negation-aware extractor,
+                   orchestrator
 review_ui/         FastAPI HITL review queue
-sample_data/       synthetic CSVs (MCAR/MAR/MNAR/schema-drift/dedup fixtures) and
-                   synthetic clinical-note PDFs (negation/subject-attribution/
-                   hedge-language/OCR-fallback fixtures)
+sample_data/       synthetic vendor/procurement CSVs (MCAR/MAR/MNAR/schema-drift/
+                   dedup fixtures) and synthetic vendor-contract PDFs (negation/
+                   subject-attribution/hedge-language/OCR-fallback fixtures)
 scripts/           sample-data generators, plus llm_cost_report.py (observability)
                    and evaluate_extraction.py (gold-set precision/recall eval)
 tests/             unit tests; LLM calls are mocked, no live API key needed
@@ -276,10 +292,10 @@ tests/             unit tests; LLM calls are mocked, no live API key needed
 
 This is a portfolio-scale reference implementation, not a production system.
 It doesn't handle: multi-tenant isolation, streaming ingest (S3 events / Kafka),
-horizontal worker scaling, a real NER-based de-identification model (the demo
-uses regex — swap for AWS Comprehend Medical or an in-house model), or a
-proper schema-registry service (a JSON file stands in for Glue Data Catalog).
-The interfaces are shaped so any of those are a swap-in, not a rewrite.
+horizontal worker scaling, a real NER-based redaction model (the demo uses regex
+— swap for AWS Comprehend or an in-house DLP model), or a proper schema-registry
+service (a JSON file stands in for Glue Data Catalog). The interfaces are shaped
+so any of those are a swap-in, not a rewrite.
 
 `scripts/evaluate_extraction.py` is also a hand-rolled harness, not a formal
 LLM evaluation framework — it has no faithfulness/groundedness scoring, no
@@ -287,4 +303,4 @@ LLM-as-judge cross-check, and no run-over-run trend tracking. A production
 version of this would sit on Ragas or TruLens (or LangSmith/Braintrust for the
 tracing side) rather than a custom precision/recall script. The gap is
 deliberate for a portfolio-scope repo, but it's the first thing that should
-change before this extraction logic touched a real cohort.
+change before this extraction logic touched a real contract portfolio.

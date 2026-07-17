@@ -1,14 +1,14 @@
 """
 Stage 3 (targeted focus) for CSV: decide, per column, WHY values are missing before
 choosing a repair strategy. This is the thing naive answers skip — "fill with the
-mean" silently injects bias when the missingness is MNAR (e.g. a clinical field
-that's blank precisely because the true value is the template's default/negative
-case, not because of a random sensor dropout).
+mean" silently injects bias when the missingness is MNAR (e.g. a field that's
+blank precisely because the true value is the template's default/negative case,
+not because of a random data-entry dropout).
 
 - MCAR (Missing Completely At Random): null-rate is statistically independent of
   every other observed column -> safe to auto-impute (mean/mode).
 - MAR (Missing At Random): null-rate is explained by another OBSERVED column
-  (e.g. "smoking_status" is null only for pediatric records) -> safe to
+  (e.g. "registration_number" is null only for very small vendors) -> safe to
   cross-file backfill using that relationship, never a blind average.
 - MNAR (Missing Not At Random): neither test above resolves it -> the missingness
   likely depends on the UNOBSERVED value itself -> never guess, flag for HITL.
@@ -21,6 +21,7 @@ NUMERIC_MEAN_GAP_FACTOR = 0.5  # how many std-devs apart present/missing means m
 MAR_HIGH_NULL_RATE = 0.9
 MAR_LOW_NULL_RATE = 0.1
 MIN_GROUP_SIZE = 5
+ID_LIKE_CARDINALITY_RATIO = 0.5  # >50% unique non-null values -> treat as an identifier, not a category
 
 
 class MissingnessClassifier:
@@ -35,9 +36,9 @@ class MissingnessClassifier:
         chi-square/t-test rigor can tell them apart from the data alone; that's
         the textbook limitation of Little's-test-style MCAR diagnostics. A
         staff-level answer accounts for this by naming known-risky fields up
-        front from domain knowledge (e.g. "smoking_status" in a clinical
-        template that silently skips it for non-smokers) rather than trusting
-        the statistical test to catch every case.
+        front from domain knowledge (e.g. "compliance_flag" in a procurement
+        template that silently skips it for vendors with nothing to report)
+        rather than trusting the statistical test to catch every case.
         """
         self.domain_priors = domain_priors or {}
 
@@ -69,6 +70,17 @@ class MissingnessClassifier:
 
     # -- internals --------------------------------------------------------
 
+    def _looks_like_identifier(self, series: pd.Series) -> bool:
+        """A column where most non-null values are unique (an id, a free-text
+        registration number) isn't a meaningful category to group by -- every
+        'category' is 1-2 rows, so its null-rate trivially looks like 0% or
+        100% by chance. Treating it as an explaining/testing column produces
+        false MAR signals on columns that are really independent."""
+        non_null = series.dropna()
+        if len(non_null) == 0:
+            return False
+        return non_null.nunique() / len(non_null) > ID_LIKE_CARDINALITY_RATIO
+
     def _find_explaining_column(self, null_mask: pd.Series, df: pd.DataFrame, other_columns: list[str]) -> str | None:
         for col in other_columns:
             other = df[col]
@@ -85,12 +97,14 @@ class MissingnessClassifier:
                 if p_value < ALPHA and mean_gap > present.std() * NUMERIC_MEAN_GAP_FACTOR:
                     return col
             else:
+                if self._looks_like_identifier(other):
+                    continue
                 contingency = pd.crosstab(other.fillna("__NA__"), null_mask)
                 if contingency.shape[0] < 2 or True not in contingency.columns:
                     continue
                 null_rate_by_category = contingency[True] / contingency.sum(axis=1)
                 # A category that's almost-always-null next to one that's almost-never-null
-                # is the textbook MAR signal (e.g. all pediatric rows skip "smoking_status").
+                # is the textbook MAR signal (e.g. all sole-proprietor rows skip "registration_number").
                 if (null_rate_by_category > MAR_HIGH_NULL_RATE).any() and (null_rate_by_category < MAR_LOW_NULL_RATE).any():
                     return col
         return None
@@ -107,6 +121,8 @@ class MissingnessClassifier:
                 if p_value < ALPHA:
                     return False
             else:
+                if self._looks_like_identifier(other):
+                    continue
                 contingency = pd.crosstab(other.fillna("__NA__"), null_mask)
                 if contingency.shape[0] < 2 or contingency.shape[1] < 2:
                     continue

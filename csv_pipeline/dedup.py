@@ -1,6 +1,6 @@
 """
 Golden-record dedup: the same entity can show up under slightly different keys
-across sources (typo'd MRN, reformatted account id). Deterministic match first,
+across sources (typo'd vendor id, reformatted account id). Deterministic match first,
 fuzzy match as a fallback, highest-confidence-wins on conflicting field values.
 
 Fuzzy matching uses edit distance rather than a similarity ratio: entity IDs

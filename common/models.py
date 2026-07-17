@@ -82,7 +82,7 @@ class SectionChunk(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     file_id = Column(UUID(as_uuid=True), ForeignKey("file_registry.id"), nullable=False)
-    section_name = Column(String(64))  # social_history | assessment | diagnosis | ...
+    section_name = Column(String(64))  # recitals | indemnification | limitation_of_liability | ...
     text = Column(Text, nullable=False)
     full_section_text = Column(Text)  # wider context used by the verify pass
     page_number = Column(Integer)
@@ -96,7 +96,7 @@ class ExtractedField(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     file_id = Column(UUID(as_uuid=True), ForeignKey("file_registry.id"), nullable=False)
-    entity_key = Column(String(128))  # MRN, account_id, patient id, etc.
+    entity_key = Column(String(128))  # vendor id, account id, contract id, etc.
     field_name = Column(String(128), nullable=False)
     value = Column(Text)
     confidence = Column(Numeric(4, 3), nullable=False, default=1.0)
@@ -128,10 +128,10 @@ class HitlReview(Base):
 
 class AuditLog(Base):
     """
-    Every LLM call, prompt, and output — mandatory once PHI/PII is anywhere near
-    the pipeline. Also the observability trail: latency, token counts, and
-    estimated cost per call, so a prompt or model change shows up as a number
-    (see scripts/llm_cost_report.py) instead of a vibe.
+    Every LLM call, prompt, and output — mandatory once sensitive/regulated data
+    is anywhere near the pipeline. Also the observability trail: latency, token
+    counts, and estimated cost per call, so a prompt or model change shows up as
+    a number (see scripts/llm_cost_report.py) instead of a vibe.
     """
     __tablename__ = "audit_log"
 

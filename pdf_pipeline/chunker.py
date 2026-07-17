@@ -1,15 +1,16 @@
 """
-Stage 3 (targeted focus) for PDF: split a note into section-scoped chunks so the
-precision layer only ever sees the paragraphs that matter ("Social History",
-"Assessment") instead of the whole document. Falls back to fuzzy heading match
-so a nonstandard template still gets chunked rather than silently dropped.
+Stage 3 (targeted focus) for PDF: split a document into section-scoped chunks so
+the precision layer only ever sees the paragraphs that matter ("Limitation of
+Liability", "Indemnification") instead of the whole document. Falls back to
+fuzzy heading match so a nonstandard template still gets chunked rather than
+silently dropped.
 """
 import re
 from dataclasses import dataclass
 
 SECTION_HEADINGS = [
-    "chief complaint", "history of present illness", "social history",
-    "past medical history", "assessment", "plan", "diagnosis", "family history",
+    "recitals", "indemnification", "limitation of liability",
+    "affiliates and subcontractors", "term and termination", "governing law",
 ]
 
 HEADING_PATTERN = re.compile(
