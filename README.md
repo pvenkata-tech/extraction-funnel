@@ -1,4 +1,4 @@
-# Extraction Funnel
+# 🗂️ Extraction Funnel
 
 A working reference implementation of a **progressive extraction funnel** — the
 system design pattern for turning millions of messy files (structured CSVs or
@@ -17,7 +17,7 @@ INGEST         →   CHEAP FILTER    →    TARGETED FOCUS    →    PRECISION L
 (mechanical)       (deterministic)      (rule/stat-based)      (LLM, narrow set)    (queryable + audited)
 ```
 
-## Two archetypes, one shape
+## 🔀 Two archetypes, one shape
 
 | | CSV / structured (`csv_pipeline/`) | PDF / unstructured (`pdf_pipeline/`) |
 |---|---|---|
@@ -27,7 +27,7 @@ INGEST         →   CHEAP FILTER    →    TARGETED FOCUS    →    PRECISION L
 | Precision layer | — (rules resolve almost everything) | Claude, negation-aware, only on the narrowed chunk |
 | Core risk if done naively | Blind imputation silently biases the cohort (MNAR) | Missed negation puts the wrong patient in the cohort |
 
-## Architecture
+## 🗺️ Architecture
 
 ```mermaid
 flowchart TD
@@ -81,7 +81,7 @@ flowchart TD
     style STORE fill:#4A235A,color:#eee,stroke:#8E44AD,stroke-width:2px
 ```
 
-## What's actually implemented (not stubbed)
+## 🧱 What's actually implemented (not stubbed)
 
 - **Missingness classification with a statistical basis, not a guess.** `csv_pipeline/missingness_classifier.py`
   runs a t-test/chi-square check to decide whether a null is MCAR, MAR (explained
@@ -122,7 +122,7 @@ flowchart TD
   batch, so one bad file (a missing OCR dependency, a malformed LLM response)
   silently rolled back every already-successful extraction in the run.
 
-## Verified results (real run against this repo's sample data)
+## 📊 Verified results (real run against this repo's sample data)
 
 CSV pipeline, 3 files / 80 entities / 460 raw field observations:
 ```
@@ -156,7 +156,7 @@ PDF pipeline, 6 clinical notes:
 1 of 6 documents (`patient_0003`) never reached the LLM at all — the entire point
 of the cheap filter stage.
 
-## Running it
+## 🚀 Running it
 
 Requires Docker and an [Anthropic API key](https://console.anthropic.com/).
 
@@ -188,7 +188,7 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-## Cost model
+## 💰 Cost model
 
 The cheap filter is the whole cost story. On this sample set, the lexical gate
 discarded 1 of 6 PDFs (~17%) before any LLM call; at real document volumes,
@@ -197,7 +197,7 @@ cost is incurred at all. Every LLM call in this repo runs against a single
 narrowed chunk (a few hundred tokens), not a raw document — that's the
 difference between "5% of files reach the LLM" and "100% of files reach the LLM."
 
-## Repo layout
+## 📂 Repo layout
 
 ```
 common/           SQLAlchemy models (file_registry, extracted_field, hitl_review,
@@ -214,7 +214,7 @@ scripts/           deterministic generators for the sample data above
 tests/             unit tests; LLM calls are mocked, no live API key needed
 ```
 
-## What this deliberately doesn't do
+## 🚧 What this deliberately doesn't do
 
 This is a portfolio-scale reference implementation, not a production system.
 It doesn't handle: multi-tenant isolation, streaming ingest (S3 events / Kafka),
