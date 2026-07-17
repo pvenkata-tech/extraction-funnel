@@ -127,7 +127,12 @@ class HitlReview(Base):
 
 
 class AuditLog(Base):
-    """Every LLM call, prompt, and output — mandatory once PHI/PII is anywhere near the pipeline."""
+    """
+    Every LLM call, prompt, and output — mandatory once PHI/PII is anywhere near
+    the pipeline. Also the observability trail: latency, token counts, and
+    estimated cost per call, so a prompt or model change shows up as a number
+    (see scripts/llm_cost_report.py) instead of a vibe.
+    """
     __tablename__ = "audit_log"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
@@ -135,4 +140,8 @@ class AuditLog(Base):
     model = Column(String(64))
     prompt = Column(Text)
     response = Column(Text)
+    latency_ms = Column(Integer)
+    input_tokens = Column(Integer)
+    output_tokens = Column(Integer)
+    estimated_cost_usd = Column(Numeric(10, 6))
     created_at = Column(DateTime, default=datetime.utcnow)

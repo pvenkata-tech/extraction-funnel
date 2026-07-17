@@ -41,8 +41,8 @@ class NegationAwareExtractor:
 
     async def extract(self, chunk, session, file_id=None) -> dict:
         prompt = EXTRACTION_PROMPT.format(chunk_text=chunk.text)
-        parsed = await extract_json(prompt, model=settings.extraction_model)
-        log_llm_call(session, file_id, settings.extraction_model, prompt, str(parsed))
+        parsed, telemetry = await extract_json(prompt, model=settings.extraction_model)
+        log_llm_call(session, file_id, settings.extraction_model, prompt, str(parsed), telemetry=telemetry)
         parsed["extraction_pass"] = 1
 
         if parsed["confidence"] < self.confidence_threshold or self._looks_ambiguous(parsed):
@@ -56,7 +56,7 @@ class NegationAwareExtractor:
 
     async def _verify_pass(self, chunk, first_pass: dict, session, file_id) -> dict:
         prompt = VERIFY_PROMPT.format(first_pass=first_pass, full_section_text=chunk.full_section_text)
-        parsed = await extract_json(prompt, model=settings.verify_model)
-        log_llm_call(session, file_id, settings.verify_model, prompt, str(parsed))
+        parsed, telemetry = await extract_json(prompt, model=settings.verify_model)
+        log_llm_call(session, file_id, settings.verify_model, prompt, str(parsed), telemetry=telemetry)
         parsed["extraction_pass"] = 2
         return parsed

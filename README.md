@@ -27,6 +27,19 @@ INGEST         →   CHEAP FILTER    →    TARGETED FOCUS    →    PRECISION L
 | Precision layer | — (rules resolve almost everything) | Claude, negation-aware, only on the narrowed chunk |
 | Core risk if done naively | Blind imputation silently biases the cohort (MNAR) | Missed negation puts the wrong patient in the cohort |
 
+## 🛠️ Tech Stack
+
+| Layer | Technology |
+|---|---|
+| LLM | Anthropic Claude — Haiku (extraction) + Sonnet (verify pass) |
+| API / orchestration | Python 3.11, FastAPI, asyncio |
+| Structured store | PostgreSQL 16, SQLAlchemy 2.0 |
+| Cheap-filter search | OpenSearch 2.18 |
+| OCR | PyMuPDF (native text) + Tesseract (scanned/image fallback) |
+| Data validation | pandas, SciPy (t-test / chi-square for missingness classification) |
+| Infra | Docker Compose |
+| Testing | pytest, pytest-asyncio |
+
 ## 🗺️ Architecture
 
 ```mermaid
@@ -121,6 +134,14 @@ flowchart TD
   its own DB transaction. An early version shared one transaction across the whole
   batch, so one bad file (a missing OCR dependency, a malformed LLM response)
   silently rolled back every already-successful extraction in the run.
+- **LLM observability, not just an audit trail.** Every call in `common/llm.py`
+  captures latency, input/output token counts, and an estimated cost, and
+  `common/audit.py` writes them onto the `audit_log` row alongside the prompt and
+  response. `scripts/llm_cost_report.py` aggregates that by model — on a real run
+  of the 6 sample PDFs this reports 5 Haiku calls + 1 Sonnet verify pass, ~1.2K
+  input / ~280 output tokens, ~1.6s avg latency, **$0.0047 total cost**. This is
+  the minimum telemetry needed to answer "did the last prompt change get slower
+  or more expensive" without grepping logs.
 
 ## 📊 Verified results (real run against this repo's sample data)
 
@@ -156,6 +177,34 @@ PDF pipeline, 6 clinical notes:
 1 of 6 documents (`patient_0003`) never reached the LLM at all — the entire point
 of the cheap filter stage.
 
+## 🎯 Evaluating extraction quality (not just unit tests)
+
+`tests/` mocks every LLM call — that verifies the *wiring* (verify-pass triggers,
+confidence gating, HITL routing), not whether the *prompt* is any good.
+`scripts/evaluate_extraction.py` is the separate answer to that: it runs the real
+Claude extractor against a small hand-labeled gold set and reports precision/recall
+per class, gated at 80% accuracy so it can fail a CI run if a prompt edit regresses
+quality.
+
+```
+file               smoking: expected -> predicted         cancer_dx: exp -> pred   match
+patient_0001.pdf   non_smoker -> non_smoker               true -> true             OK
+patient_0002.pdf   smoker -> smoker                       true -> true             OK
+patient_0004.pdf   non_smoker -> non_smoker               true -> true             OK
+patient_0005.pdf   unknown -> unknown                     true -> true             OK
+patient_0006.pdf   non_smoker -> non_smoker               true -> true             OK
+
+smoking_status accuracy: 100.0% (5/5)
+  smoker       precision=1.00  recall=1.00
+  non_smoker   precision=1.00  recall=1.00
+  unknown      precision=1.00  recall=1.00
+```
+
+Five labeled examples is a floor, not a claim of statistical rigor — the honest
+framing is "this is the harness," not "this is a validated model." In production
+this gold set grows from every HITL correction the review queue produces, not
+from hand-curation.
+
 ## 🚀 Running it
 
 Requires Docker and an [Anthropic API key](https://console.anthropic.com/).
@@ -173,6 +222,12 @@ docker compose run --rm app python -m pdf_pipeline.pipeline sample_data/pdf
 
 # HITL review queue
 docker compose up app        # http://localhost:8080
+
+# LLM cost/latency report
+docker compose run --rm app python -m scripts.llm_cost_report
+
+# Extraction quality gold-set eval (real Claude calls)
+docker compose run --rm -e ANTHROPIC_API_KEY app python -m scripts.evaluate_extraction
 ```
 
 Regenerate the synthetic sample data (deterministic, seeded):
@@ -196,6 +251,8 @@ keyword/schema filters typically discard 85–95% of files before precision-laye
 cost is incurred at all. Every LLM call in this repo runs against a single
 narrowed chunk (a few hundred tokens), not a raw document — that's the
 difference between "5% of files reach the LLM" and "100% of files reach the LLM."
+Every call's actual cost is measured, not estimated after the fact — see
+`scripts/llm_cost_report.py` and the observability bullet above.
 
 ## 📂 Repo layout
 
@@ -210,7 +267,8 @@ review_ui/         FastAPI HITL review queue
 sample_data/       synthetic CSVs (MCAR/MAR/MNAR/schema-drift/dedup fixtures) and
                    synthetic clinical-note PDFs (negation/subject-attribution/
                    hedge-language/OCR-fallback fixtures)
-scripts/           deterministic generators for the sample data above
+scripts/           sample-data generators, plus llm_cost_report.py (observability)
+                   and evaluate_extraction.py (gold-set precision/recall eval)
 tests/             unit tests; LLM calls are mocked, no live API key needed
 ```
 
