@@ -4,6 +4,7 @@ missingness -> impute/backfill/flag -> dedup -> write to the structured store.
 
 Run: python -m csv_pipeline.pipeline sample_data/csv
 """
+import asyncio
 import hashlib
 import sys
 from collections import Counter
@@ -18,6 +19,7 @@ from csv_pipeline.dedup import merge_records
 from csv_pipeline.missingness_classifier import MissingnessClassifier
 from csv_pipeline.schema_registry import SchemaRegistry
 from csv_pipeline.validator import profile_columns
+from integrations.notifier import HitlEvent, HitlNotifier
 
 ENTITY_KEY_COLUMN = "entity_key"
 SOURCE_SYSTEM_COLUMN = "source_system"
@@ -50,6 +52,8 @@ def run(data_dir: str):
     frames = {path: pd.read_csv(path) for path in csv_paths}
     method_counts = Counter()
     all_rows = []
+    file_names_by_id = {}
+    hitl_events = []
 
     with get_session() as session:
         for path, df in frames.items():
@@ -72,6 +76,7 @@ def run(data_dir: str):
             )
             session.add(file_row)
             session.flush()
+            file_names_by_id[file_row.id] = path.name
 
             for profile in profile_columns(df):
                 session.add(ColumnProfile(file_id=file_row.id, **profile))
@@ -135,11 +140,24 @@ def run(data_dir: str):
                 if method == "human_review":
                     session.flush()
                     session.add(HitlReview(extracted_field_id=field.id, reason=reason))
+                    hitl_events.append(HitlEvent(
+                        file_name=file_names_by_id.get(file_id, "unknown"), entity_key=record.canonical_key,
+                        field_name=field_name, value=value, reason=reason,
+                    ))
 
     total = sum(method_counts.values()) or 1
     print("\n--- Data Quality Report ---")
     for method, count in method_counts.most_common():
         print(f"  {method:>14}: {count:>5}  ({count / total:.1%})")
+
+    if hitl_events:
+        asyncio.run(_send_hitl_notifications(hitl_events))
+
+
+async def _send_hitl_notifications(events: list[HitlEvent]) -> None:
+    async with HitlNotifier() as notifier:
+        for event in events:
+            await notifier.notify(event)
 
 
 if __name__ == "__main__":

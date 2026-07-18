@@ -15,6 +15,7 @@ from pathlib import Path
 from common.config import settings
 from common.db import get_session, init_db
 from common.models import ExtractedField, FileRegistry, HitlReview, SectionChunk
+from integrations.notifier import HitlEvent, HitlNotifier
 from pdf_pipeline.chunker import chunk_by_section, relevant_chunks
 from pdf_pipeline.deid import deidentify
 from pdf_pipeline.extractor import NegationAwareExtractor
@@ -39,7 +40,7 @@ def _detect_indemnification(chunks) -> tuple[str, float]:
     return "false", 0.7  # absence of a keyword is weaker evidence than presence
 
 
-async def _process_file(path: Path, session, extractor: NegationAwareExtractor):
+async def _process_file(path: Path, session, extractor: NegationAwareExtractor, notifier: HitlNotifier):
     checksum = _checksum(path)
     if session.query(FileRegistry).filter_by(checksum=checksum).first():
         print(f"[skip] {path.name} already ingested (checksum match)")
@@ -93,12 +94,14 @@ async def _process_file(path: Path, session, extractor: NegationAwareExtractor):
     session.flush()
 
     if confidence < settings.confidence_threshold:
-        session.add(HitlReview(
-            extracted_field_id=field.id,
-            reason="negation_ambiguous" if negation_detected else "low_confidence",
-        ))
+        reason = "negation_ambiguous" if negation_detected else "low_confidence"
+        session.add(HitlReview(extracted_field_id=field.id, reason=reason))
         field.extraction_method = "human_review"
         print(f"[precision] {path.name}: liability_cap_status='{result['liability_cap_status']}' confidence={confidence:.2f} -> HITL queue")
+        await notifier.notify(HitlEvent(
+            file_name=path.name, entity_key=path.stem, field_name="liability_cap_status",
+            value=result["liability_cap_status"], reason=reason,
+        ))
     else:
         print(f"[precision] {path.name}: liability_cap_status='{result['liability_cap_status']}' confidence={confidence:.2f} -> stored")
 
@@ -117,12 +120,13 @@ async def run(data_dir: str):
     # already succeeded. This is the same "safely re-runnable" property the
     # cheatsheet calls out under idempotency -- one failure shouldn't force
     # reprocessing the whole batch.
-    for path in pdf_paths:
-        try:
-            with get_session() as session:
-                await _process_file(path, session, extractor)
-        except Exception as exc:
-            print(f"[error] {path.name}: {exc!r} -- skipped, other files unaffected")
+    async with HitlNotifier() as notifier:
+        for path in pdf_paths:
+            try:
+                with get_session() as session:
+                    await _process_file(path, session, extractor, notifier)
+            except Exception as exc:
+                print(f"[error] {path.name}: {exc!r} -- skipped, other files unaffected")
 
     with get_session() as session:
         print("\n--- Risk Review Query: indemnification_present=true AND liability_cap_status=uncapped ---")

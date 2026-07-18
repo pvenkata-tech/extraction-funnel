@@ -37,6 +37,7 @@ INGEST         →   CHEAP FILTER    →    TARGETED FOCUS    →    PRECISION L
 | Cheap-filter search | OpenSearch 2.18 |
 | OCR | PyMuPDF (native text) + Tesseract (scanned/image fallback) |
 | Data validation | pandas, SciPy (t-test / chi-square for missingness classification) |
+| HITL tool-calling | MCP (`mcp` SDK) — Jira Service Management + Slack servers, stdio transport |
 | Infra | Docker Compose |
 | Testing | pytest, pytest-asyncio |
 
@@ -75,6 +76,11 @@ flowchart TD
         AUDIT[Audit Log]
     end
 
+    subgraph NOTIFY["🔌 MCP Tool-Calling Layer"]
+        JIRA[Jira Service Management MCP server\ncreate_hitl_ticket]
+        SLACK[Slack MCP server\npost_hitl_alert]
+    end
+
     CSV --> PARSE --> SCHEMA --> CLASSIFY
     PDF --> PARSE --> DEID --> LEXICAL
     LEXICAL -->|no match: discard, no LLM cost| X[ ]
@@ -87,11 +93,14 @@ flowchart TD
     VERIFY -->|still uncertain| HITL
     LLM --> AUDIT
     HITL --> PG
+    HITL -.->|ENABLE_MCP_NOTIFICATIONS=true| JIRA
+    HITL -.->|ENABLE_MCP_NOTIFICATIONS=true| SLACK
 
     style FILTER fill:#1E4D2B,color:#eee,stroke:#27AE60,stroke-width:2px
     style TARGET fill:#2C3E50,color:#eee,stroke:#3498DB,stroke-width:2px
     style PRECISION fill:#784212,color:#eee,stroke:#E67E22,stroke-width:2px
     style STORE fill:#4A235A,color:#eee,stroke:#8E44AD,stroke-width:2px
+    style NOTIFY fill:#1B4F72,color:#eee,stroke:#5DADE2,stroke-width:2px
 ```
 
 ## 🧱 What's actually implemented (not stubbed)
@@ -144,6 +153,16 @@ flowchart TD
 - **A live HITL review queue** (`review_ui/`) — a small FastAPI app that lists
   every low-confidence/MNAR-flagged field and lets a reviewer accept, correct, or
   reject it.
+- **Real MCP servers wired into the HITL boundary** (`integrations/`) — a Jira
+  Service Management server (`create_hitl_ticket`) and a Slack server
+  (`post_hitl_alert`), each a genuine stdio MCP server built on the official
+  `mcp` SDK, called through a real `ClientSession`/`stdio_client` connection,
+  not a mocked interface. Fires the moment a field lands in the HITL queue —
+  MNAR-flagged CSV rows and low-confidence/negation-ambiguous PDF fields alike
+  — so a reviewer finds out from Slack/Jira instead of polling `review_ui/`.
+  Off by default (`ENABLE_MCP_NOTIFICATIONS=false`) and a failed tool call is
+  logged and swallowed, never fails the extraction run — see
+  [🔌 HITL Notifications via MCP](#-hitl-notifications-via-mcp) below.
 - **Per-file transactional isolation** — the PDF pipeline processes each file in
   its own DB transaction. An early version shared one transaction across the whole
   batch, so one bad file (a missing OCR dependency, a malformed LLM response)
@@ -258,6 +277,51 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
+## 🔌 HITL Notifications via MCP
+
+Every HITL trigger in this repo — an MNAR-flagged CSV field, a low-confidence
+or negation-ambiguous PDF field — is also a tool-calling opportunity: instead
+of a reviewer polling `review_ui/`, the pipeline can call out through MCP the
+moment the field lands in the queue.
+
+`integrations/jira_server.py` and `integrations/slack_server.py` are real
+stdio MCP servers built on the official `mcp` SDK (`FastMCP`), each wrapping
+one real API (Jira Cloud REST v3, Slack's `chat.postMessage`) behind a single
+tool (`create_hitl_ticket`, `post_hitl_alert`). `integrations/notifier.py` is
+the client side: `HitlNotifier` opens one `ClientSession` per server per
+pipeline run (not a subprocess per event) and calls both tools whenever a
+`HitlEvent` fires from `csv_pipeline/pipeline.py` or `pdf_pipeline/pipeline.py`.
+
+This is deliberately the same shape as an agent's tool-calling loop — a
+caller decides to invoke a named MCP tool with structured arguments and gets
+a structured result back — just triggered by a deterministic confidence/MNAR
+gate instead of an LLM's tool-choice decision.
+
+```bash
+# Enable it (needs real credentials -- see .env.example for the full list)
+ENABLE_MCP_NOTIFICATIONS=true
+JIRA_BASE_URL=https://your-domain.atlassian.net
+JIRA_EMAIL=you@example.com
+JIRA_API_TOKEN=...
+JIRA_PROJECT_KEY=EXTR
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_CHANNEL=#extraction-funnel-hitl
+
+# Run a server standalone (e.g. to attach it to Claude Desktop or another MCP host)
+python -m integrations.jira_server
+python -m integrations.slack_server
+```
+
+Off by default (`ENABLE_MCP_NOTIFICATIONS=false`) so the pipeline runs end to
+end on Docker Compose without any Jira/Slack account — the same "swap-in, not
+a rewrite" posture as the redaction and schema-registry stand-ins below. A
+failed or unconfigured tool call is logged and swallowed
+(`integrations/notifier.py::HitlNotifier._call_tool`) — a notification
+outage must never fail the extraction run itself. Salesforce Agentforce IT
+Service was evaluated as a third target but skipped: this repo's HITL queue
+is a vendor/procurement risk workflow, not an IT service desk, so it wasn't
+a natural fit the way Jira Service Management and Slack are.
+
 ## 💰 Cost model
 
 The cheap filter is the whole cost story. On this sample set, the lexical gate
@@ -279,6 +343,9 @@ csv_pipeline/      schema registry, validator, missingness classifier, backfill,
 pdf_pipeline/      OCR (native + Tesseract fallback), sensitive-field redaction,
                    lexical filter, section chunker, negation-aware extractor,
                    orchestrator
+integrations/      Jira Service Management + Slack MCP servers (jira_server.py,
+                   slack_server.py) and the MCP client wiring (notifier.py) that
+                   calls them from the HITL boundary in both pipelines
 review_ui/         FastAPI HITL review queue
 sample_data/       synthetic vendor/procurement CSVs (MCAR/MAR/MNAR/schema-drift/
                    dedup fixtures) and synthetic vendor-contract PDFs (negation/
